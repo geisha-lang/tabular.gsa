@@ -1,4 +1,4 @@
-// Typed columnar DataFrame (`data.frame`) bridged directly to `duckdb`
+// Typed columnar DataFrame (`tabular.frame`) bridged directly to `duckdb`
 // and pivotable into 2D `(T, N)` `Panel` matrices.
 
 use std.option.{Option, Some, None}
@@ -14,8 +14,8 @@ use duckdb.duckdb.{
     resGetBool, resColToFloatArray, resColToInt64Array, resColToStrArray
 }
 use duckdb.dsl.{Query, runQuery}
-use dataset.series.{Series, MkSeries}
-use dataset.panel.{Panel, panelNew, panelSet}
+use tabular.series.{Series, MkSeries}
+use tabular.panel.{Panel, panelNew, panelSet}
 
 pub data Column {
     ColF64(String, MutArray Float),

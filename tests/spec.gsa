@@ -1,4 +1,4 @@
-// Verification suite for `data.gsa` (`tests/spec.gsa`).
+// Verification suite for `tabular.gsa` (`tests/spec.gsa`).
 
 use std.result.{Result, Ok, Err}
 use sys.fs.removeFile
@@ -7,16 +7,16 @@ use sys.proc.exit
 
 use duckdb.duckdb.{openMemory, closeDb, connect, disconnect, exec, writeParquet}
 use duckdb.dsl.{(|>), col, litFloat, gt, fromParquet, selectCols, filter, orderByAsc}
-use dataset.series.{
+use tabular.series.{
     nanVal, isNan, seriesNew, seriesSet, seriesGet,
     seriesMean, seriesStd, seriesMedian, seriesRank, seriesZscore,
     seriesCorr, seriesRankCorr, seriesRollingMean, seriesEma
 }
-use dataset.panel.{
+use tabular.panel.{
     panelGet, panelCsRank, panelTsRollingMean,
     panelSaveBin, panelOpenMmap, mmapPanelTime, mmapPanelGet, mmapPanelClose
 }
-use dataset.frame.{dfRun, dfToPanel}
+use tabular.frame.{dfRun, dfToPanel}
 
 def assertTrue(label: String, ok: Bool): Result Void String =
     if (ok) Ok(()) else Err("ASSERT FAILED: " + label)
@@ -65,7 +65,7 @@ def testSeriesStats(): Result Void String = {
     assertTrue("ema[0] == 1.0", approxEq(seriesGet(em, 0), 1.0, 1.0e-9))?;
     assertTrue("ema[1] == 1.5", approxEq(seriesGet(em, 1), 1.5, 1.0e-9))?;
 
-    printLn("  [PASS] data.series: NaN-aware stats, tie-avg rank, Spearman RankIC, rolling & EMA");
+    printLn("  [PASS] tabular.series: NaN-aware stats, tie-avg rank, Spearman RankIC, rolling & EMA");
     Ok(())
 }
 
@@ -116,18 +116,18 @@ def testDuckDbToPanelAndMmap(): Result Void String = {
     let _ = removeFile(binPath);
     disconnect(conn);
     closeDb(db);
-    printLn("  [PASS] data.frame + data.panel: DuckDB Parquet -> DataFrame -> (T, N) Panel -> GSPNL01 mmap");
+    printLn("  [PASS] tabular.frame + tabular.panel: DuckDB Parquet -> DataFrame -> (T, N) Panel -> GSPNL01 mmap");
     Ok(())
 }
 
 def main(): Void = {
-    printLn("Running data.gsa test suite...");
+    printLn("Running tabular.gsa test suite...");
     match testSeriesStats() {
         Err(e) -> { eprintLn("FAIL: " + e); exit(1) },
         Ok(_) ->
             match testDuckDbToPanelAndMmap() {
                 Err(e) -> { eprintLn("FAIL: " + e); exit(1) },
-                Ok(_) -> printLn("data.gsa: all tests passed!"),
+                Ok(_) -> printLn("tabular.gsa: all tests passed!"),
             },
     }
 }

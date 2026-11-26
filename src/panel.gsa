@@ -1,9 +1,9 @@
-// 2D `(T, N)` row-major quantitative Panel (`data.panel`) with cross-sectional ops,
+// 2D `(T, N)` row-major quantitative Panel (`tabular.panel`) with cross-sectional ops,
 // time-series rolling ops, and zero-copy `mmap` binary matrix persistence (`GSPNL01`).
 
 use std.result.{Result, Ok, Err}
 use sys.fs.{Mmap, mmapOpen, mmapClose}
-use dataset.series.{
+use tabular.series.{
     Series, MkSeries, nanVal, isNan,
     seriesRank, seriesDemean, seriesZscore,
     seriesShift, seriesDiff, seriesPctChange,

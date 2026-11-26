@@ -1,4 +1,4 @@
-// NaN-aware 1D numerical Series (`data.series`) for quantitative research.
+// NaN-aware 1D numerical Series (`tabular.series`) for quantitative research.
 
 extern "sqrt" def c_sqrt(x: Float): Float
 
