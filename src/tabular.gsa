@@ -1,0 +1,37 @@
+// Unified Polars-style entry point (`tabular.tabular`).
+// Prefix-free verbs (`select`, `selectCols`, `withColumns`, `filter`, `dropNulls`,
+// `groupByAgg`, `sortAsc`, `sortDesc`, `limit`, `head`, `offset`, `unique`) work
+// uniformly on both `LazyFrame` and `DataFrame` via `concept Frame`.
+
+use std.result.Result
+use duckdb.dsl.Expr
+use tabular.frame.{DataFrame, dfReadParquet, dfReadCsv}
+use tabular.lazy.{
+    Frame, LazyFrame,
+    frameSelect, frameSelectCols, frameWithColumns, frameFilter,
+    frameDropNulls, frameGroupByAgg, frameSortAsc, frameSortDesc,
+    frameLimit, frameOffset, frameUnique,
+    scanParquet, scanCsv, scanTable, collect, sinkParquet
+}
+
+pub def (|>)(x: a, f: a -> b): b = f(x)
+
+// ---- Unified `Frame` pipeline verbs (zero prefix!) ----
+
+pub def select(exprs): forall f. (Frame f) => List Expr -> f -> f = (x) -> frameSelect(exprs, x)
+pub def selectCols(names): forall f. (Frame f) => List String -> f -> f = (x) -> frameSelectCols(names, x)
+pub def withColumns(exprs): forall f. (Frame f) => List Expr -> f -> f = (x) -> frameWithColumns(exprs, x)
+pub def filter(pred): forall f. (Frame f) => Expr -> f -> f = (x) -> frameFilter(pred, x)
+pub def dropNulls(cols): forall f. (Frame f) => List String -> f -> f = (x) -> frameDropNulls(cols, x)
+pub def groupByAgg(keys, aggs): forall f. (Frame f) => (List String, List Expr) -> f -> f = (x) -> frameGroupByAgg(keys, aggs, x)
+pub def sortAsc(colName): forall f. (Frame f) => String -> f -> f = (x) -> frameSortAsc(colName, x)
+pub def sortDesc(colName): forall f. (Frame f) => String -> f -> f = (x) -> frameSortDesc(colName, x)
+pub def limit(n): forall f. (Frame f) => Int -> f -> f = (x) -> frameLimit(n, x)
+pub def head(n): forall f. (Frame f) => Int -> f -> f = (x) -> frameLimit(n, x)
+pub def offset(n): forall f. (Frame f) => Int -> f -> f = (x) -> frameOffset(n, x)
+pub def unique(): forall f. (Frame f) => () -> f -> f = (x) -> frameUnique(x)
+
+// ---- Convenient top-level IO entry points ----
+
+pub def readParquet(path: String): Result DataFrame String = dfReadParquet(path)
+pub def readCsv(path: String): Result DataFrame String = dfReadCsv(path)

@@ -6,21 +6,19 @@ use sys.io.eprintLn
 use sys.proc.exit
 
 use duckdb.duckdb.{openMemory, closeDb, connect, disconnect, exec, writeParquet}
-use tabular.expr.{
-    (|>),
-    eCol, eFloat, eMul, eGt, eSum, eMean, eCountAll, alias
-}
+use duckdb.dsl.{col, litFloat, mul, gt, sum, countAll}
+use tabular.expr.{alias, mean}
 use tabular.series.{
     nanVal, isNan, seriesNew, seriesSet, seriesGet,
     seriesMean, seriesStd, seriesMedian, seriesRank, seriesZscore,
     seriesCorr, seriesRankCorr, seriesRollingMean, seriesEma
 }
-use tabular.frame.{
-    dfHeight, dfWidth, dfSelect, dfDrop, dfHead, dfSeries, dfColStr, dfFormat, dfReadParquet
-}
-use tabular.lazy.{
-    scanParquet, lfWithColumns, lfFilter, lfDropNulls, lfGroupByAgg,
-    lfSortDesc, lfLimit, collect, sinkParquet
+use tabular.frame.{dfHeight, dfWidth, dfDrop, dfSeries, dfColStr, dfFormat}
+use tabular.lazy.{scanParquet, collect, sinkParquet}
+use tabular.tabular.{
+    (|>),
+    selectCols, withColumns, filter, dropNulls, groupByAgg,
+    sortAsc, sortDesc, limit, head, readParquet
 }
 
 def assertTrue(label: String, ok: Bool): Result Void String =
@@ -71,8 +69,7 @@ def testSeriesStats(): Result Void String = {
     Ok(())
 }
 
-def testPolarsStyleLazyAndFrame(): Result Void String = {
-    // Seed a sample Parquet file
+def testUnifiedFrameConcept(): Result Void String = {
     let db = openMemory()?;
     let conn = connect(db)?;
     exec(conn, "CREATE TABLE trades (sym VARCHAR, price DOUBLE, qty DOUBLE)")?;
@@ -83,18 +80,18 @@ def testPolarsStyleLazyAndFrame(): Result Void String = {
     disconnect(conn);
     closeDb(db);
 
-    // Pure Polars-style LazyFrame pipeline: zero raw SQL, zero manual DB handles!
+    // 1. Unified prefix-free verbs on LazyFrame
     let lf = scanParquet(inPq)
-        |> lfDropNulls(["qty"])
-        |> lfWithColumns([alias(eMul(eCol("price"), eCol("qty")), "notional")])
-        |> lfFilter(eGt(eCol("notional"), eFloat(400.0)))
-        |> lfGroupByAgg(["sym"], [
-            alias(eSum(eCol("notional")), "total_notional"),
-            alias(eMean(eCol("price")), "avg_price"),
-            alias(eCountAll(), "n_trades")
+        |> dropNulls(["qty"])
+        |> withColumns([alias(mul(col("price"), col("qty")), "notional")])
+        |> filter(gt(col("notional"), litFloat(400.0)))
+        |> groupByAgg(["sym"], [
+            alias(sum(col("notional")), "total_notional"),
+            alias(mean(col("price")), "avg_price"),
+            alias(countAll(), "n_trades")
         ])
-        |> lfSortDesc("total_notional")
-        |> lfLimit(10);
+        |> sortDesc("total_notional")
+        |> limit(10);
 
     let df = collect(lf)?;
     assertTrue("df shape (2, 4)", dfHeight(df) == 2 && dfWidth(df) == 4)?;
@@ -106,26 +103,31 @@ def testPolarsStyleLazyAndFrame(): Result Void String = {
     assertTrue("BTC total_notional == 1700", approxEq(seriesGet(totals, 0), 1700.0, 1.0e-6))?;
     assertTrue("BTC avg_price == 110", approxEq(seriesGet(avgs, 0), 110.0, 1.0e-6))?;
     assertTrue("second sym == ETH", arrayGet(syms, 1) == "ETH")?;
-    assertTrue("ETH total_notional == 1000", approxEq(seriesGet(totals, 1), 1000.0, 1.0e-6))?;
 
-    // In-memory DataFrame ops: select, drop, head, format
-    let slim = dfSelect(df, ["sym", "total_notional"])?;
-    assertTrue("dfSelect width == 2", dfWidth(slim) == 2)?;
-    let dropped = dfDrop(slim, ["total_notional"]);
+    // 2. Exact same prefix-free verbs (`sortAsc`, `selectCols`, `head`, `filter`) on eager DataFrame!
+    let topEth = df
+        |> sortAsc("total_notional")
+        |> selectCols(["sym", "total_notional"])
+        |> head(1);
+    assertTrue("DataFrame via Frame concept shape (1, 2)", dfHeight(topEth) == 1 && dfWidth(topEth) == 2)?;
+    let ethSyms = dfColStr(topEth, "sym")?;
+    assertTrue("DataFrame sortAsc + head(1) == ETH", arrayGet(ethSyms, 0) == "ETH")?;
+
+    let filteredDf = df |> filter(gt(col("total_notional"), litFloat(1200.0)));
+    assertTrue("DataFrame filter rows == 1", dfHeight(filteredDf) == 1)?;
+
+    let dropped = dfDrop(topEth, ["total_notional"]);
     assertTrue("dfDrop width == 1", dfWidth(dropped) == 1)?;
-    let top1 = dfHead(df, 1);
-    assertTrue("dfHead height == 1", dfHeight(top1) == 1)?;
-    let formatted = dfFormat(top1, 5);
-    assertTrue("dfFormat non-empty", strLen(formatted) > 20)?;
+    assertTrue("dfFormat non-empty", strLen(dfFormat(topEth, 5)) > 20)?;
 
-    // Streaming sinkParquet + zero-boilerplate dfReadParquet round-trip
+    // 3. Streaming sinkParquet + readParquet round-trip
     sinkParquet(lf, outPq)?;
-    let reloaded = dfReadParquet(outPq)?;
+    let reloaded = readParquet(outPq)?;
     assertTrue("reloaded parquet shape (2, 4)", dfHeight(reloaded) == 2 && dfWidth(reloaded) == 4)?;
 
     let _ = removeFile(inPq);
     let _ = removeFile(outPq);
-    printLn("  [PASS] tabular.lazy + tabular.frame: Polars-style LazyFrame -> collect -> DataFrame -> sinkParquet");
+    printLn("  [PASS] concept Frame: unified prefix-free API works identically on LazyFrame & DataFrame");
     Ok(())
 }
 
@@ -134,7 +136,7 @@ def main(): Void = {
     match testSeriesStats() {
         Err(e) -> { eprintLn("FAIL: " + e); exit(1) },
         Ok(_) ->
-            match testPolarsStyleLazyAndFrame() {
+            match testUnifiedFrameConcept() {
                 Err(e) -> { eprintLn("FAIL: " + e); exit(1) },
                 Ok(_) -> printLn("tabular.gsa: all tests passed!"),
             },

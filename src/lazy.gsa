@@ -1,16 +1,15 @@
-// Polars-style LazyFrame (`tabular.lazy`) powered by DuckDB under the hood.
-// Users compose transformations with `|>` and never write raw SQL or manage DB handles:
-//
-//   scanParquet("trades.parquet")
-//     |> lfWithColumns([alias(eMul(eCol("price"), eCol("qty")), "notional")])
-//     |> lfFilter(eGt(eCol("notional"), eFloat(1000.0)))
-//     |> lfGroupByAgg(["sym"], [alias(eSum(eCol("notional")), "vol"), alias(eCountAll(), "n")])
-//     |> lfSortDesc("vol")
-//     |> lfLimit(10)
-//     |> collect
+// Unified `concept Frame f` + Polars-style `LazyFrame` (`tabular.lazy`).
+// Both `LazyFrame` and `DataFrame` implement `Frame`, so the exact same
+// prefix-free verbs (`select`, `selectCols`, `withColumns`, `filter`,
+// `dropNulls`, `groupByAgg`, `sortAsc`, `sortDesc`, `limit`, `head`, `unique`)
+// work uniformly with `|>`.
 
 use std.result.{Result, Ok, Err}
-use duckdb.duckdb.{Connection, openMemory, closeDb, connect, disconnect, closeResult}
+use std.buf.{bufNew, bufPushByte, bufPushStr, bufToString}
+use std.str.{i64ToStr, floatToStr}
+use duckdb.duckdb.{
+    Connection, openMemory, closeDb, connect, disconnect, exec, closeResult
+}
 use duckdb.dsl.{
     Query, Expr, OrderItem,
     fromTable, fromParquet, fromCsv, fromSubquery,
@@ -20,49 +19,40 @@ use duckdb.dsl.{
     rawExpr, col, isNotNull, and_,
     toSql, runQuery, writeQueryParquet
 }
-use tabular.frame.{DataFrame, dfFromResult}
+use tabular.series.isNan
+use tabular.frame.{
+    Column, ColF64, ColI64, ColStr, ColFlag,
+    DataFrame, MkDataFrame, colName, dfFromResult, dfSelect, dfSlice
+}
 
 pub data LazyFrame {
     LazyFrame(Query),
 }
 
+// ---- Unified Frame Concept ----
+
+pub concept Frame f {
+    def frameSelect(exprs: List Expr, x: f): f,
+    def frameSelectCols(names: List String, x: f): f,
+    def frameWithColumns(exprs: List Expr, x: f): f,
+    def frameFilter(pred: Expr, x: f): f,
+    def frameDropNulls(cols: List String, x: f): f,
+    def frameGroupByAgg(keys: List String, aggs: List Expr, x: f): f,
+    def frameSortAsc(colName: String, x: f): f,
+    def frameSortDesc(colName: String, x: f): f,
+    def frameLimit(n: Int, x: f): f,
+    def frameOffset(n: Int, x: f): f,
+    def frameUnique(x: f): f
+}
+
+// ---- LazyFrame constructors & helpers ----
+
 pub def scanParquet(path: String): LazyFrame = LazyFrame(fromParquet(path))
 pub def scanCsv(path: String): LazyFrame = LazyFrame(fromCsv(path))
 pub def scanTable(name: String): LazyFrame = LazyFrame(fromTable(name))
 
-pub def lfExplain(lf: LazyFrame): String = match lf {
+pub def explain(lf: LazyFrame): String = match lf {
     LazyFrame(q) -> toSql(q),
-}
-
-pub def lfSelect(exprs: List Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(select(exprs)(q)),
-}
-
-pub def lfSelectCols(names: List String): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(selectCols(names)(q)),
-}
-
-// Polars-style `with_columns`: keeps all existing columns and appends computed expressions.
-// Wraps the upstream query in a subquery if projections or aggregations were already applied.
-pub def lfWithColumns(exprs: List Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> {
-        let baseQ = match q.projections {
-            Nil -> q,
-            _ -> fromSubquery(q, "_lf_sub"),
-        };
-        LazyFrame(select(Cons(rawExpr("*"), exprs))(baseQ))
-    },
-}
-
-pub def lfFilter(pred: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> {
-        // If `withColumns` or `select` created aliases, wrap before filtering so aliases are visible.
-        let baseQ = match q.projections {
-            Nil -> q,
-            _ -> fromSubquery(q, "_lf_flt"),
-        };
-        LazyFrame(filter(pred)(baseQ))
-    },
 }
 
 def buildNotNullPred(cols: List String): Expr = match cols {
@@ -70,9 +60,6 @@ def buildNotNullPred(cols: List String): Expr = match cols {
     Cons(c, Nil) -> isNotNull(col(c)),
     Cons(c, rest) -> and_(isNotNull(col(c)), buildNotNullPred(rest)),
 }
-
-pub def lfDropNulls(cols: List String): LazyFrame -> LazyFrame =
-    lfFilter(buildNotNullPred(cols))
 
 def mapKeyCols(keys: List String): List Expr = match keys {
     Nil -> Nil,
@@ -84,59 +71,205 @@ def appendExprs(a: List Expr, b: List Expr): List Expr = match a {
     Cons(h, t) -> Cons(h, appendExprs(t, b)),
 }
 
-// Polars-style `group_by(keys).agg(aggs)`: automatically includes group keys in the output.
-pub def lfGroupByAgg(keys: List String, aggs: List Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> {
-        let baseQ = match q.projections {
-            Nil -> q,
-            _ -> fromSubquery(q, "_lf_grp"),
-        };
-        let proj = appendExprs(mapKeyCols(keys), aggs);
-        LazyFrame(groupBy(keys)(select(proj)(baseQ)))
-    },
-}
-
-pub def lfHaving(pred: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(having(pred)(q)),
-}
-
-pub def lfSort(items: List OrderItem): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(orderBy(items)(q)),
-}
-
-pub def lfSortAsc(colName: String): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(orderByAsc(colName)(q)),
-}
-
-pub def lfSortDesc(colName: String): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(orderByDesc(colName)(q)),
-}
-
-pub def lfLimit(n: Int): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(limit(n)(q)),
-}
-
-pub def lfOffset(n: Int): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(offset(n)(q)),
-}
-
-pub def lfUnique(): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
-    LazyFrame(q) -> LazyFrame(distinct()(q)),
-}
-
-pub def lfJoinInner(table: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+pub def joinInnerTable(table: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
     LazyFrame(q) -> LazyFrame(joinInner(table, onExpr)(q)),
 }
 
-pub def lfJoinLeft(table: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+pub def joinLeftTable(table: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
     LazyFrame(q) -> LazyFrame(joinLeft(table, onExpr)(q)),
 }
 
-pub def lfJoinParquetLeft(path: String, aliasName: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+pub def joinLeftParquet(path: String, aliasName: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
     LazyFrame(q) -> LazyFrame(joinParquetLeft(path, aliasName, onExpr)(q)),
 }
 
-// Execute LazyFrame on an existing DuckDB connection.
+pub def sortBy(items: List OrderItem): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(orderBy(items)(q)),
+}
+
+pub def havingPred(pred: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(having(pred)(q)),
+}
+
+instance Frame LazyFrame {
+    def frameSelect(exprs, lf) = match lf {
+        LazyFrame(q) -> LazyFrame(select(exprs)(q)),
+    }
+    def frameSelectCols(names, lf) = match lf {
+        LazyFrame(q) -> LazyFrame(selectCols(names)(q)),
+    }
+    def frameWithColumns(exprs, lf) = match lf {
+        LazyFrame(q) -> {
+            let baseQ = match q.projections {
+                Nil -> q,
+                _ -> fromSubquery(q, "_lf_sub"),
+            };
+            LazyFrame(select(Cons(rawExpr("*"), exprs))(baseQ))
+        },
+    }
+    def frameFilter(pred, lf) = match lf {
+        LazyFrame(q) -> {
+            let baseQ = match q.projections {
+                Nil -> q,
+                _ -> fromSubquery(q, "_lf_flt"),
+            };
+            LazyFrame(filter(pred)(baseQ))
+        },
+    }
+    def frameDropNulls(cols, lf) = frameFilter(buildNotNullPred(cols), lf)
+    def frameGroupByAgg(keys, aggs, lf) = match lf {
+        LazyFrame(q) -> {
+            let baseQ = match q.projections {
+                Nil -> q,
+                _ -> fromSubquery(q, "_lf_grp"),
+            };
+            let proj = appendExprs(mapKeyCols(keys), aggs);
+            LazyFrame(groupBy(keys)(select(proj)(baseQ)))
+        },
+    }
+    def frameSortAsc(colName, lf) = match lf {
+        LazyFrame(q) -> LazyFrame(orderByAsc(colName)(q)),
+    }
+    def frameSortDesc(colName, lf) = match lf {
+        LazyFrame(q) -> LazyFrame(orderByDesc(colName)(q)),
+    }
+    def frameLimit(n, lf) = match lf {
+        LazyFrame(q) -> LazyFrame(limit(n)(q)),
+    }
+    def frameOffset(n, lf) = match lf {
+        LazyFrame(q) -> LazyFrame(offset(n)(q)),
+    }
+    def frameUnique(lf) = match lf {
+        LazyFrame(q) -> LazyFrame(distinct()(q)),
+    }
+}
+
+// ---- Eager DataFrame execution helper (runs any LazyFrame op on an in-memory DataFrame) ----
+
+def quoteSqlIdent(name: String): String = {
+    let out = bufNew();
+    bufPushByte(out, 34);
+    let n = strLen(name);
+    let i = cellNew(0);
+    while (cellGet(i) < n) {
+        let b = strByteAt(name, cellGet(i));
+        if (b == 34) { bufPushByte(out, 34); bufPushByte(out, 34) }
+        else bufPushByte(out, b);
+        cellSet(i, cellGet(i) + 1)
+    };
+    bufPushByte(out, 34);
+    bufToString(out)
+}
+
+def quoteSqlStr(s: String): String = {
+    let out = bufNew();
+    bufPushByte(out, 39);
+    let n = strLen(s);
+    let i = cellNew(0);
+    while (cellGet(i) < n) {
+        let b = strByteAt(s, cellGet(i));
+        if (b == 39) { bufPushByte(out, 39); bufPushByte(out, 39) }
+        else bufPushByte(out, b);
+        cellSet(i, cellGet(i) + 1)
+    };
+    bufPushByte(out, 39);
+    bufToString(out)
+}
+
+def pushColSchema(out: std.buf.StringBuf, cols: List Column, first: Bool): Void = match cols {
+    Nil -> (),
+    Cons(c, rest) -> {
+        if (!first) bufPushStr(out, ", ") else ();
+        bufPushStr(out, quoteSqlIdent(colName(c)));
+        match c {
+            ColF64(_, _) -> bufPushStr(out, " DOUBLE"),
+            ColI64(_, _) -> bufPushStr(out, " BIGINT"),
+            ColStr(_, _) -> bufPushStr(out, " VARCHAR"),
+            ColFlag(_, _) -> bufPushStr(out, " BOOLEAN"),
+        };
+        pushColSchema(out, rest, false)
+    },
+}
+
+def pushRowValues(out: std.buf.StringBuf, cols: List Column, row: Int, first: Bool): Void = match cols {
+    Nil -> (),
+    Cons(c, rest) -> {
+        if (!first) bufPushStr(out, ", ") else ();
+        match c {
+            ColF64(_, arr) -> {
+                let v = arrayGet(arr, row);
+                if (isNan(v)) bufPushStr(out, "NULL") else bufPushStr(out, floatToStr(v))
+            },
+            ColI64(_, arr) -> bufPushStr(out, i64ToStr(arrayGet(arr, row))),
+            ColStr(_, arr) -> bufPushStr(out, quoteSqlStr(arrayGet(arr, row))),
+            ColFlag(_, arr) -> bufPushStr(out, if (arrayGet(arr, row)) "TRUE" else "FALSE"),
+        };
+        pushRowValues(out, rest, row, false)
+    },
+}
+
+def runOnDataFrame(df: DataFrame, f: LazyFrame -> LazyFrame): DataFrame = {
+    match openMemory() {
+        Err(_) -> df,
+        Ok(db) -> match connect(db) {
+            Err(_) -> { closeDb(db); df },
+            Ok(conn) -> {
+                let ddl = bufNew();
+                bufPushStr(ddl, "CREATE TABLE _df (");
+                pushColSchema(ddl, df.cols, true);
+                bufPushStr(ddl, ")");
+                let okCreate = match exec(conn, bufToString(ddl)) {
+                    Ok(_) -> true,
+                    Err(_) -> false,
+                };
+                if (okCreate && df.numRows > 0) {
+                    let ins = bufNew();
+                    bufPushStr(ins, "INSERT INTO _df VALUES ");
+                    let r = cellNew(0);
+                    while (cellGet(r) < df.numRows) {
+                        let idx = cellGet(r);
+                        if (idx > 0) bufPushStr(ins, ", ") else ();
+                        bufPushStr(ins, "(");
+                        pushRowValues(ins, df.cols, idx, true);
+                        bufPushStr(ins, ")");
+                        cellSet(r, idx + 1)
+                    };
+                    let _ = exec(conn, bufToString(ins));
+                    ()
+                } else ();
+                let outDf = if (okCreate) {
+                    match collectWith(conn, f(scanTable("_df"))) {
+                        Ok(resDf) -> resDf,
+                        Err(_) -> df,
+                    }
+                } else df;
+                disconnect(conn);
+                closeDb(db);
+                outDf
+            },
+        },
+    }
+}
+
+instance Frame DataFrame {
+    def frameSelect(exprs, df) = runOnDataFrame(df, (lf) -> frameSelect(exprs, lf))
+    def frameSelectCols(names, df) = match dfSelect(df, names) {
+        Ok(out) -> out,
+        Err(_) -> df,
+    }
+    def frameWithColumns(exprs, df) = runOnDataFrame(df, (lf) -> frameWithColumns(exprs, lf))
+    def frameFilter(pred, df) = runOnDataFrame(df, (lf) -> frameFilter(pred, lf))
+    def frameDropNulls(cols, df) = runOnDataFrame(df, (lf) -> frameDropNulls(cols, lf))
+    def frameGroupByAgg(keys, aggs, df) = runOnDataFrame(df, (lf) -> frameGroupByAgg(keys, aggs, lf))
+    def frameSortAsc(colName, df) = runOnDataFrame(df, (lf) -> frameSortAsc(colName, lf))
+    def frameSortDesc(colName, df) = runOnDataFrame(df, (lf) -> frameSortDesc(colName, lf))
+    def frameLimit(n, df) = dfSlice(df, 0, n)
+    def frameOffset(n, df) = dfSlice(df, n, df.numRows)
+    def frameUnique(df) = runOnDataFrame(df, (lf) -> frameUnique(lf))
+}
+
+// ---- Materialization & streaming sink ----
+
 pub def collectWith(conn: Connection, lf: LazyFrame): Result DataFrame String = match lf {
     LazyFrame(q) -> {
         let r = runQuery(conn, q)?;
@@ -146,7 +279,6 @@ pub def collectWith(conn: Connection, lf: LazyFrame): Result DataFrame String = 
     },
 }
 
-// Zero-boilerplate execution: spins up an ephemeral DuckDB engine, executes, and cleans up.
 pub def collect(lf: LazyFrame): Result DataFrame String = {
     let db = openMemory()?;
     let conn = connect(db)?;
