@@ -1,0 +1,246 @@
+// 2D `(T, N)` row-major quantitative Panel (`data.panel`) with cross-sectional ops,
+// time-series rolling ops, and zero-copy `mmap` binary matrix persistence (`GSPNL01`).
+
+use std.result.{Result, Ok, Err}
+use sys.fs.{Mmap, mmapOpen, mmapClose}
+use dataset.series.{
+    Series, MkSeries, nanVal, isNan,
+    seriesRank, seriesDemean, seriesZscore,
+    seriesShift, seriesDiff, seriesPctChange,
+    seriesRollingMean, seriesRollingStd, seriesEma
+}
+
+extern "gs_data_write_bytes" def c_write_bytes(path: String, buf: Ptr, len: Int64): Int
+
+pub data Panel {
+    MkPanel {
+        rows: Int,
+        cols: Int,
+        times: MutArray Int64,
+        assets: MutArray String,
+        values: MutArray Float,
+    },
+}
+
+pub data MmapPanel {
+    MkMmapPanel {
+        mmap: Mmap,
+        rows: Int,
+        cols: Int,
+        dataOffset: Int64,
+    },
+}
+
+pub def panelNew(rows: Int, cols: Int): Panel =
+    MkPanel {
+        rows: rows,
+        cols: cols,
+        times: arrayNew(rows, intToI64(0)),
+        assets: arrayNew(cols, ""),
+        values: arrayNew(rows * cols, nanVal()),
+    }
+
+pub def panelGet(p: Panel, t: Int, n: Int): Float =
+    arrayGet(p.values, t * p.cols + n)
+
+pub def panelSet(p: Panel, t: Int, n: Int, v: Float): Void =
+    arraySet(p.values, t * p.cols + n, v)
+
+pub def panelRow(p: Panel, t: Int): Series = {
+    let arr = arrayNew(p.cols, nanVal());
+    let base = t * p.cols;
+    let n = cellNew(0);
+    while (cellGet(n) < p.cols) {
+        let j = cellGet(n);
+        arraySet(arr, j, arrayGet(p.values, base + j));
+        cellSet(n, j + 1)
+    };
+    MkSeries { len: p.cols, values: arr }
+}
+
+pub def panelCol(p: Panel, colIdx: Int): Series = {
+    let arr = arrayNew(p.rows, nanVal());
+    let t = cellNew(0);
+    while (cellGet(t) < p.rows) {
+        let i = cellGet(t);
+        arraySet(arr, i, arrayGet(p.values, i * p.cols + colIdx));
+        cellSet(t, i + 1)
+    };
+    MkSeries { len: p.rows, values: arr }
+}
+
+pub def panelSliceTime(p: Panel, tStart: Int, tEnd: Int): Panel = {
+    let s = if (tStart < 0) 0 else tStart;
+    let e = if (tEnd > p.rows) p.rows else tEnd;
+    let newRows = if (e > s) e - s else 0;
+    let out = panelNew(newRows, p.cols);
+    let c = cellNew(0);
+    while (cellGet(c) < p.cols) {
+        let j = cellGet(c);
+        arraySet(out.assets, j, arrayGet(p.assets, j));
+        cellSet(c, j + 1)
+    };
+    let i = cellNew(0);
+    while (cellGet(i) < newRows) {
+        let dstT = cellGet(i);
+        let srcT = s + dstT;
+        arraySet(out.times, dstT, arrayGet(p.times, srcT));
+        let j = cellNew(0);
+        while (cellGet(j) < p.cols) {
+            let col = cellGet(j);
+            panelSet(out, dstT, col, panelGet(p, srcT, col));
+            cellSet(j, col + 1)
+        };
+        cellSet(i, dstT + 1)
+    };
+    out
+}
+
+def panelCloneMeta(p: Panel): Panel = {
+    let out = panelNew(p.rows, p.cols);
+    let i = cellNew(0);
+    while (cellGet(i) < p.rows) {
+        let t = cellGet(i);
+        arraySet(out.times, t, arrayGet(p.times, t));
+        cellSet(i, t + 1)
+    };
+    let j = cellNew(0);
+    while (cellGet(j) < p.cols) {
+        let c = cellGet(j);
+        arraySet(out.assets, c, arrayGet(p.assets, c));
+        cellSet(j, c + 1)
+    };
+    out
+}
+
+def mapCrossSection(p: Panel, f: Series -> Series): Panel = {
+    let out = panelCloneMeta(p);
+    let t = cellNew(0);
+    while (cellGet(t) < p.rows) {
+        let i = cellGet(t);
+        let res = f(panelRow(p, i));
+        let n = cellNew(0);
+        while (cellGet(n) < p.cols) {
+            let j = cellGet(n);
+            panelSet(out, i, j, arrayGet(res.values, j));
+            cellSet(n, j + 1)
+        };
+        cellSet(t, i + 1)
+    };
+    out
+}
+
+def mapTimeSeries(p: Panel, f: Series -> Series): Panel = {
+    let out = panelCloneMeta(p);
+    let n = cellNew(0);
+    while (cellGet(n) < p.cols) {
+        let j = cellGet(n);
+        let res = f(panelCol(p, j));
+        let t = cellNew(0);
+        while (cellGet(t) < p.rows) {
+            let i = cellGet(t);
+            panelSet(out, i, j, arrayGet(res.values, i));
+            cellSet(t, i + 1)
+        };
+        cellSet(n, j + 1)
+    };
+    out
+}
+
+pub def panelCsRank(p: Panel): Panel = mapCrossSection(p, seriesRank)
+pub def panelCsDemean(p: Panel): Panel = mapCrossSection(p, seriesDemean)
+pub def panelCsZscore(p: Panel): Panel = mapCrossSection(p, seriesZscore)
+
+pub def panelTsShift(p: Panel, periods: Int): Panel =
+    mapTimeSeries(p, (s) -> seriesShift(s, periods))
+
+pub def panelTsDiff(p: Panel, periods: Int): Panel =
+    mapTimeSeries(p, (s) -> seriesDiff(s, periods))
+
+pub def panelTsPctChange(p: Panel, periods: Int): Panel =
+    mapTimeSeries(p, (s) -> seriesPctChange(s, periods))
+
+pub def panelTsRollingMean(p: Panel, window: Int, minPeriods: Int): Panel =
+    mapTimeSeries(p, (s) -> seriesRollingMean(s, window, minPeriods))
+
+pub def panelTsRollingStd(p: Panel, window: Int, minPeriods: Int): Panel =
+    mapTimeSeries(p, (s) -> seriesRollingStd(s, window, minPeriods))
+
+pub def panelTsEma(p: Panel, span: Float): Panel =
+    mapTimeSeries(p, (s) -> seriesEma(s, span))
+
+// ---- Zero-copy binary matrix format (`GSPNL01`) ----
+// Layout: [8B magic "GSPNL01\0"][8B i64 rows][8B i64 cols][rows*8B i64 times][rows*cols*8B f64 values]
+
+pub def panelSaveBin(p: Panel, path: String): Result Void String = {
+    let hdrBytes = 24;
+    let timeBytes = p.rows * 8;
+    let dataBytes = p.rows * p.cols * 8;
+    let total = hdrBytes + timeBytes + dataBytes;
+    let buf = ptrAllocBytes(total);
+
+    ptrCopyFromStr(buf, 0, "GSPNL01", 7);
+    ptrSetByte(buf, 7, 0);
+    ptrWriteI64Le(buf, 8, intToI64(p.rows));
+    ptrWriteI64Le(buf, 16, intToI64(p.cols));
+
+    let ti = cellNew(0);
+    while (cellGet(ti) < p.rows) {
+        let i = cellGet(ti);
+        ptrWriteI64Le(buf, hdrBytes + i * 8, arrayGet(p.times, i));
+        cellSet(ti, i + 1)
+    };
+
+    let dataOff = hdrBytes + timeBytes;
+    let totalVals = p.rows * p.cols;
+    let vi = cellNew(0);
+    while (cellGet(vi) < totalVals) {
+        let k = cellGet(vi);
+        ptrWriteF64Le(buf, dataOff + k * 8, arrayGet(p.values, k));
+        cellSet(vi, k + 1)
+    };
+
+    if (c_write_bytes(path, buf, intToI64(total)) == 0) Ok(())
+    else Err("failed to write GSPNL01 file: " + path)
+}
+
+pub def panelOpenMmap(path: String): Result MmapPanel String = {
+    let m = mmapOpen(path)?;
+    if (m.len < intToI64(24)) {
+        mmapClose(m);
+        Err("invalid GSPNL01 file (too short): " + path)
+    } else {
+        let magic = ptrSliceToString(m.ptr, 7);
+        if (magic != "GSPNL01") {
+            mmapClose(m);
+            Err("invalid GSPNL01 magic header: " + path)
+        } else {
+            let rows = i64ToInt(ptrReadI64Le(m.ptr, 8));
+            let cols = i64ToInt(ptrReadI64Le(m.ptr, 16));
+            let dataOff = intToI64(24) + intToI64(rows) * intToI64(8);
+            let need = dataOff + intToI64(rows) * intToI64(cols) * intToI64(8);
+            if (rows < 0 || cols < 0 || m.len < need) {
+                mmapClose(m);
+                Err("truncated GSPNL01 file: " + path)
+            } else {
+                Ok(MkMmapPanel {
+                    mmap: m,
+                    rows: rows,
+                    cols: cols,
+                    dataOffset: dataOff,
+                })
+            }
+        }
+    }
+}
+
+pub def mmapPanelTime(mp: MmapPanel, t: Int): Int64 =
+    ptrReadI64Le(ptrOffset64(mp.mmap.ptr, intToI64(24) + intToI64(t) * intToI64(8)), 0)
+
+pub def mmapPanelGet(mp: MmapPanel, t: Int, n: Int): Float = {
+    let byteOff = mp.dataOffset + (intToI64(t) * intToI64(mp.cols) + intToI64(n)) * intToI64(8);
+    ptrReadF64Le(ptrOffset64(mp.mmap.ptr, byteOff), 0)
+}
+
+pub def mmapPanelClose(mp: MmapPanel): Void =
+    mmapClose(mp.mmap)

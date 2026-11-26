@@ -1,0 +1,535 @@
+// NaN-aware 1D numerical Series (`data.series`) for quantitative research.
+
+extern "sqrt" def c_sqrt(x: Float): Float
+
+pub data Series {
+    MkSeries {
+        len: Int,
+        values: MutArray Float,
+    },
+}
+
+pub def nanVal(): Float = 0.0 / 0.0
+
+pub def isNan(x: Float): Bool = !(x == x)
+
+pub def absF(x: Float): Float = if (x < 0.0) 0.0 - x else x
+
+pub def seriesNew(n: Int, fill: Float): Series =
+    MkSeries { len: n, values: arrayNew(n, fill) }
+
+pub def seriesFromArray(arr: MutArray Float, n: Int): Series =
+    MkSeries { len: n, values: arr }
+
+pub def seriesLen(s: Series): Int = s.len
+
+pub def seriesGet(s: Series, i: Int): Float = arrayGet(s.values, i)
+
+pub def seriesSet(s: Series, i: Int, v: Float): Void = arraySet(s.values, i, v)
+
+pub def seriesValidCount(s: Series): Int = {
+    let cnt = cellNew(0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let v = arrayGet(s.values, cellGet(i));
+        if (!isNan(v)) cellSet(cnt, cellGet(cnt) + 1) else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    cellGet(cnt)
+}
+
+pub def seriesSum(s: Series): Float = {
+    let acc = cellNew(0.0);
+    let cnt = cellNew(0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let v = arrayGet(s.values, cellGet(i));
+        if (!isNan(v)) {
+            cellSet(acc, cellGet(acc) + v);
+            cellSet(cnt, cellGet(cnt) + 1)
+        } else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    if (cellGet(cnt) == 0) nanVal() else cellGet(acc)
+}
+
+pub def seriesMean(s: Series): Float = {
+    let acc = cellNew(0.0);
+    let cnt = cellNew(0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let v = arrayGet(s.values, cellGet(i));
+        if (!isNan(v)) {
+            cellSet(acc, cellGet(acc) + v);
+            cellSet(cnt, cellGet(cnt) + 1)
+        } else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    if (cellGet(cnt) == 0) nanVal() else cellGet(acc) / intToFloat(cellGet(cnt))
+}
+
+// Sample standard deviation (ddof = 1 when ddof1 is true, else population ddof = 0).
+pub def seriesStd(s: Series, ddof1: Bool): Float = {
+    let mu = seriesMean(s);
+    if (isNan(mu)) nanVal()
+    else {
+        let ss = cellNew(0.0);
+        let cnt = cellNew(0);
+        let i = cellNew(0);
+        while (cellGet(i) < s.len) {
+            let v = arrayGet(s.values, cellGet(i));
+            if (!isNan(v)) {
+                let d = v - mu;
+                cellSet(ss, cellGet(ss) + d * d);
+                cellSet(cnt, cellGet(cnt) + 1)
+            } else ();
+            cellSet(i, cellGet(i) + 1)
+        };
+        let n = cellGet(cnt);
+        let denom = if (ddof1) n - 1 else n;
+        if (denom <= 0) nanVal() else c_sqrt(cellGet(ss) / intToFloat(denom))
+    }
+}
+
+pub def seriesMin(s: Series): Float = {
+    let has = cellNew(false);
+    let best = cellNew(0.0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let v = arrayGet(s.values, cellGet(i));
+        if (!isNan(v)) {
+            if (!cellGet(has) || v < cellGet(best)) {
+                cellSet(best, v);
+                cellSet(has, true)
+            } else ()
+        } else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    if (cellGet(has)) cellGet(best) else nanVal()
+}
+
+pub def seriesMax(s: Series): Float = {
+    let has = cellNew(false);
+    let best = cellNew(0.0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let v = arrayGet(s.values, cellGet(i));
+        if (!isNan(v)) {
+            if (!cellGet(has) || v > cellGet(best)) {
+                cellSet(best, v);
+                cellSet(has, true)
+            } else ()
+        } else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    if (cellGet(has)) cellGet(best) else nanVal()
+}
+
+// In-place merge sort for Float array slice [0..n).
+def sortFloats(arr: MutArray Float, n: Int): Void = {
+    if (n <= 1) ()
+    else {
+        let tmp = arrayNew(n, 0.0);
+        let width = cellNew(1);
+        while (cellGet(width) < n) {
+            let w = cellGet(width);
+            let left = cellNew(0);
+            while (cellGet(left) < n) {
+                let l = cellGet(left);
+                let mid = if (l + w < n) l + w else n;
+                let right = if (l + 2 * w < n) l + 2 * w else n;
+                let i = cellNew(l);
+                let j = cellNew(mid);
+                let k = cellNew(l);
+                while (cellGet(i) < mid && cellGet(j) < right) {
+                    let a = arrayGet(arr, cellGet(i));
+                    let b = arrayGet(arr, cellGet(j));
+                    if (a <= b) {
+                        arraySet(tmp, cellGet(k), a);
+                        cellSet(i, cellGet(i) + 1)
+                    } else {
+                        arraySet(tmp, cellGet(k), b);
+                        cellSet(j, cellGet(j) + 1)
+                    };
+                    cellSet(k, cellGet(k) + 1)
+                };
+                while (cellGet(i) < mid) {
+                    arraySet(tmp, cellGet(k), arrayGet(arr, cellGet(i)));
+                    cellSet(i, cellGet(i) + 1);
+                    cellSet(k, cellGet(k) + 1)
+                };
+                while (cellGet(j) < right) {
+                    arraySet(tmp, cellGet(k), arrayGet(arr, cellGet(j)));
+                    cellSet(j, cellGet(j) + 1);
+                    cellSet(k, cellGet(k) + 1)
+                };
+                let c = cellNew(l);
+                while (cellGet(c) < right) {
+                    arraySet(arr, cellGet(c), arrayGet(tmp, cellGet(c)));
+                    cellSet(c, cellGet(c) + 1)
+                };
+                cellSet(left, l + 2 * w)
+            };
+            cellSet(width, w * 2)
+        }
+    }
+}
+
+// Linear-interpolated quantile q in [0, 1].
+pub def seriesQuantile(s: Series, q: Float): Float = {
+    let valid = arrayNew(s.len, 0.0);
+    let cnt = cellNew(0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let v = arrayGet(s.values, cellGet(i));
+        if (!isNan(v)) {
+            arraySet(valid, cellGet(cnt), v);
+            cellSet(cnt, cellGet(cnt) + 1)
+        } else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    let n = cellGet(cnt);
+    if (n == 0) nanVal()
+    else if (n == 1) arrayGet(valid, 0)
+    else {
+        sortFloats(valid, n);
+        let qc = if (q < 0.0) 0.0 else if (q > 1.0) 1.0 else q;
+        let pos = qc * intToFloat(n - 1);
+        let lo = floatToInt(pos);
+        let hi = if (lo + 1 < n) lo + 1 else n - 1;
+        let frac = pos - intToFloat(lo);
+        arrayGet(valid, lo) * (1.0 - frac) + arrayGet(valid, hi) * frac
+    }
+}
+
+pub def seriesMedian(s: Series): Float = seriesQuantile(s, 0.5)
+
+// Fractional average-tie rank scaled to (0, 1] (NaN stays NaN).
+pub def seriesRank(s: Series): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let idxArr = arrayNew(s.len, 0);
+    let valArr = arrayNew(s.len, 0.0);
+    let cnt = cellNew(0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let v = arrayGet(s.values, idx);
+        if (!isNan(v)) {
+            let k = cellGet(cnt);
+            arraySet(idxArr, k, idx);
+            arraySet(valArr, k, v);
+            cellSet(cnt, k + 1)
+        } else ();
+        cellSet(i, idx + 1)
+    };
+    let n = cellGet(cnt);
+    if (n > 0) {
+        // Merge sort (valArr, idxArr) jointly by valArr
+        let tmpV = arrayNew(n, 0.0);
+        let tmpI = arrayNew(n, 0);
+        let width = cellNew(1);
+        while (cellGet(width) < n) {
+            let w = cellGet(width);
+            let left = cellNew(0);
+            while (cellGet(left) < n) {
+                let l = cellGet(left);
+                let mid = if (l + w < n) l + w else n;
+                let right = if (l + 2 * w < n) l + 2 * w else n;
+                let p = cellNew(l);
+                let q = cellNew(mid);
+                let k = cellNew(l);
+                while (cellGet(p) < mid && cellGet(q) < right) {
+                    let a = arrayGet(valArr, cellGet(p));
+                    let b = arrayGet(valArr, cellGet(q));
+                    if (a <= b) {
+                        arraySet(tmpV, cellGet(k), a);
+                        arraySet(tmpI, cellGet(k), arrayGet(idxArr, cellGet(p)));
+                        cellSet(p, cellGet(p) + 1)
+                    } else {
+                        arraySet(tmpV, cellGet(k), b);
+                        arraySet(tmpI, cellGet(k), arrayGet(idxArr, cellGet(q)));
+                        cellSet(q, cellGet(q) + 1)
+                    };
+                    cellSet(k, cellGet(k) + 1)
+                };
+                while (cellGet(p) < mid) {
+                    arraySet(tmpV, cellGet(k), arrayGet(valArr, cellGet(p)));
+                    arraySet(tmpI, cellGet(k), arrayGet(idxArr, cellGet(p)));
+                    cellSet(p, cellGet(p) + 1);
+                    cellSet(k, cellGet(k) + 1)
+                };
+                while (cellGet(q) < right) {
+                    arraySet(tmpV, cellGet(k), arrayGet(valArr, cellGet(q)));
+                    arraySet(tmpI, cellGet(k), arrayGet(idxArr, cellGet(q)));
+                    cellSet(q, cellGet(q) + 1);
+                    cellSet(k, cellGet(k) + 1)
+                };
+                let c = cellNew(l);
+                while (cellGet(c) < right) {
+                    arraySet(valArr, cellGet(c), arrayGet(tmpV, cellGet(c)));
+                    arraySet(idxArr, cellGet(c), arrayGet(tmpI, cellGet(c)));
+                    cellSet(c, cellGet(c) + 1)
+                };
+                cellSet(left, l + 2 * w)
+            };
+            cellSet(width, w * 2)
+        };
+        let denom = intToFloat(n);
+        let pos = cellNew(0);
+        while (cellGet(pos) < n) {
+            let start = cellGet(pos);
+            let v0 = arrayGet(valArr, start);
+            let end = cellNew(start + 1);
+            while (cellGet(end) < n && arrayGet(valArr, cellGet(end)) == v0) {
+                cellSet(end, cellGet(end) + 1)
+            };
+            let e = cellGet(end);
+            let avgRank = (intToFloat(start + 1) + intToFloat(e)) * 0.5 / denom;
+            let k = cellNew(start);
+            while (cellGet(k) < e) {
+                arraySet(out, arrayGet(idxArr, cellGet(k)), avgRank);
+                cellSet(k, cellGet(k) + 1)
+            };
+            cellSet(pos, e)
+        }
+    } else ();
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesDemean(s: Series): Series = {
+    let mu = seriesMean(s);
+    let out = arrayNew(s.len, nanVal());
+    if (!isNan(mu)) {
+        let i = cellNew(0);
+        while (cellGet(i) < s.len) {
+            let idx = cellGet(i);
+            let v = arrayGet(s.values, idx);
+            if (!isNan(v)) arraySet(out, idx, v - mu) else ();
+            cellSet(i, idx + 1)
+        }
+    } else ();
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesZscore(s: Series): Series = {
+    let mu = seriesMean(s);
+    let sd = seriesStd(s, true);
+    let out = arrayNew(s.len, nanVal());
+    if (!isNan(mu) && !isNan(sd) && sd > 0.0) {
+        let i = cellNew(0);
+        while (cellGet(i) < s.len) {
+            let idx = cellGet(i);
+            let v = arrayGet(s.values, idx);
+            if (!isNan(v)) arraySet(out, idx, (v - mu) / sd) else ();
+            cellSet(i, idx + 1)
+        }
+    } else ();
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesCorr(a: Series, b: Series): Float = {
+    let n = if (a.len < b.len) a.len else b.len;
+    let sumA = cellNew(0.0);
+    let sumB = cellNew(0.0);
+    let cnt = cellNew(0);
+    let i = cellNew(0);
+    while (cellGet(i) < n) {
+        let x = arrayGet(a.values, cellGet(i));
+        let y = arrayGet(b.values, cellGet(i));
+        if (!isNan(x) && !isNan(y)) {
+            cellSet(sumA, cellGet(sumA) + x);
+            cellSet(sumB, cellGet(sumB) + y);
+            cellSet(cnt, cellGet(cnt) + 1)
+        } else ();
+        cellSet(i, cellGet(i) + 1)
+    };
+    let m = cellGet(cnt);
+    if (m < 2) nanVal()
+    else {
+        let muA = cellGet(sumA) / intToFloat(m);
+        let muB = cellGet(sumB) / intToFloat(m);
+        let cov = cellNew(0.0);
+        let varA = cellNew(0.0);
+        let varB = cellNew(0.0);
+        let j = cellNew(0);
+        while (cellGet(j) < n) {
+            let x = arrayGet(a.values, cellGet(j));
+            let y = arrayGet(b.values, cellGet(j));
+            if (!isNan(x) && !isNan(y)) {
+                let dx = x - muA;
+                let dy = y - muB;
+                cellSet(cov, cellGet(cov) + dx * dy);
+                cellSet(varA, cellGet(varA) + dx * dx);
+                cellSet(varB, cellGet(varB) + dy * dy)
+            } else ();
+            cellSet(j, cellGet(j) + 1)
+        };
+        let denom = c_sqrt(cellGet(varA) * cellGet(varB));
+        if (denom <= 0.0) nanVal() else cellGet(cov) / denom
+    }
+}
+
+pub def seriesRankCorr(a: Series, b: Series): Float =
+    seriesCorr(seriesRank(a), seriesRank(b))
+
+pub def seriesShift(s: Series, periods: Int): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let src = idx - periods;
+        if (src >= 0 && src < s.len) {
+            arraySet(out, idx, arrayGet(s.values, src))
+        } else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesDiff(s: Series, periods: Int): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let src = idx - periods;
+        if (src >= 0 && src < s.len) {
+            let cur = arrayGet(s.values, idx);
+            let prev = arrayGet(s.values, src);
+            if (!isNan(cur) && !isNan(prev)) arraySet(out, idx, cur - prev) else ()
+        } else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesPctChange(s: Series, periods: Int): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let src = idx - periods;
+        if (src >= 0 && src < s.len) {
+            let cur = arrayGet(s.values, idx);
+            let prev = arrayGet(s.values, src);
+            if (!isNan(cur) && !isNan(prev) && prev != 0.0) {
+                arraySet(out, idx, (cur - prev) / prev)
+            } else ()
+        } else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesRollingSum(s: Series, window: Int, minPeriods: Int): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let mp = if (minPeriods <= 0) 1 else minPeriods;
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let start = if (idx - window + 1 > 0) idx - window + 1 else 0;
+        let acc = cellNew(0.0);
+        let cnt = cellNew(0);
+        let j = cellNew(start);
+        while (cellGet(j) <= idx) {
+            let v = arrayGet(s.values, cellGet(j));
+            if (!isNan(v)) {
+                cellSet(acc, cellGet(acc) + v);
+                cellSet(cnt, cellGet(cnt) + 1)
+            } else ();
+            cellSet(j, cellGet(j) + 1)
+        };
+        if (cellGet(cnt) >= mp) arraySet(out, idx, cellGet(acc)) else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesRollingMean(s: Series, window: Int, minPeriods: Int): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let mp = if (minPeriods <= 0) 1 else minPeriods;
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let start = if (idx - window + 1 > 0) idx - window + 1 else 0;
+        let acc = cellNew(0.0);
+        let cnt = cellNew(0);
+        let j = cellNew(start);
+        while (cellGet(j) <= idx) {
+            let v = arrayGet(s.values, cellGet(j));
+            if (!isNan(v)) {
+                cellSet(acc, cellGet(acc) + v);
+                cellSet(cnt, cellGet(cnt) + 1)
+            } else ();
+            cellSet(j, cellGet(j) + 1)
+        };
+        let c = cellGet(cnt);
+        if (c >= mp) arraySet(out, idx, cellGet(acc) / intToFloat(c)) else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesRollingStd(s: Series, window: Int, minPeriods: Int): Series = {
+    let out = arrayNew(s.len, nanVal());
+    let mp = if (minPeriods < 2) 2 else minPeriods;
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let start = if (idx - window + 1 > 0) idx - window + 1 else 0;
+        let acc = cellNew(0.0);
+        let cnt = cellNew(0);
+        let j = cellNew(start);
+        while (cellGet(j) <= idx) {
+            let v = arrayGet(s.values, cellGet(j));
+            if (!isNan(v)) {
+                cellSet(acc, cellGet(acc) + v);
+                cellSet(cnt, cellGet(cnt) + 1)
+            } else ();
+            cellSet(j, cellGet(j) + 1)
+        };
+        let c = cellGet(cnt);
+        if (c >= mp) {
+            let mu = cellGet(acc) / intToFloat(c);
+            let ss = cellNew(0.0);
+            let k = cellNew(start);
+            while (cellGet(k) <= idx) {
+                let v = arrayGet(s.values, cellGet(k));
+                if (!isNan(v)) {
+                    let d = v - mu;
+                    cellSet(ss, cellGet(ss) + d * d)
+                } else ();
+                cellSet(k, cellGet(k) + 1)
+            };
+            arraySet(out, idx, c_sqrt(cellGet(ss) / intToFloat(c - 1)))
+        } else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}
+
+pub def seriesEma(s: Series, span: Float): Series = {
+    let alpha = 2.0 / (span + 1.0);
+    let out = arrayNew(s.len, nanVal());
+    let hasPrev = cellNew(false);
+    let prev = cellNew(0.0);
+    let i = cellNew(0);
+    while (cellGet(i) < s.len) {
+        let idx = cellGet(i);
+        let v = arrayGet(s.values, idx);
+        if (!isNan(v)) {
+            if (!cellGet(hasPrev)) {
+                cellSet(prev, v);
+                cellSet(hasPrev, true);
+                arraySet(out, idx, v)
+            } else {
+                let next = alpha * v + (1.0 - alpha) * cellGet(prev);
+                cellSet(prev, next);
+                arraySet(out, idx, next)
+            }
+        } else if (cellGet(hasPrev)) {
+            arraySet(out, idx, cellGet(prev))
+        } else ();
+        cellSet(i, idx + 1)
+    };
+    MkSeries { len: s.len, values: out }
+}

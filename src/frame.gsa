@@ -1,0 +1,207 @@
+// Typed columnar DataFrame (`data.frame`) bridged directly to `duckdb`
+// and pivotable into 2D `(T, N)` `Panel` matrices.
+
+use std.option.{Option, Some, None}
+use std.result.{Result, Ok, Err}
+use std.str.i64ToStr
+use std.map.{strMapNew, strMapGet, strMapInsert}
+use std.vec.{vecNew, vecLen, vecPush, vecGetOr}
+use duckdb.duckdb.{
+    Connection, QueryResult,
+    ColBool, ColInt64, ColFloat, ColString,
+    query, readParquet, readCsv, closeResult,
+    resRowCount, resColCount, resColName, resColKind,
+    resGetBool, resColToFloatArray, resColToInt64Array, resColToStrArray
+}
+use duckdb.dsl.{Query, runQuery}
+use dataset.series.{Series, MkSeries}
+use dataset.panel.{Panel, panelNew, panelSet}
+
+pub data Column {
+    ColF64(String, MutArray Float),
+    ColI64(String, MutArray Int64),
+    ColStr(String, MutArray String),
+    ColFlag(String, MutArray Bool),
+}
+
+pub data DataFrame {
+    MkDataFrame {
+        numRows: Int,
+        cols: List Column,
+    },
+}
+
+pub def colName(c: Column): String = match c {
+    ColF64(n, _) -> n,
+    ColI64(n, _) -> n,
+    ColStr(n, _) -> n,
+    ColFlag(n, _) -> n,
+}
+
+def resColToBoolArray(res: QueryResult, col: Int): MutArray Bool = {
+    let n = i64ToInt(resRowCount(res));
+    let arr = arrayNew(n, false);
+    let i = cellNew(0);
+    while (cellGet(i) < n) {
+        let idx = cellGet(i);
+        arraySet(arr, idx, resGetBool(res, col, intToI64(idx)));
+        cellSet(i, idx + 1)
+    };
+    arr
+}
+
+def buildColsRec(res: QueryResult, idx: Int, total: Int): List Column =
+    if (idx >= total) Nil
+    else {
+        let nm = resColName(res, idx);
+        let col = match resColKind(res, idx) {
+            ColFloat -> ColF64(nm, resColToFloatArray(res, idx)),
+            ColInt64 -> ColI64(nm, resColToInt64Array(res, idx)),
+            ColBool -> ColFlag(nm, resColToBoolArray(res, idx)),
+            ColString -> ColStr(nm, resColToStrArray(res, idx)),
+        };
+        Cons(col, buildColsRec(res, idx + 1, total))
+    }
+
+pub def dfFromResult(res: QueryResult): DataFrame = {
+    let nRows = i64ToInt(resRowCount(res));
+    let nCols = resColCount(res);
+    MkDataFrame {
+        numRows: nRows,
+        cols: buildColsRec(res, 0, nCols),
+    }
+}
+
+pub def dfQuery(conn: Connection, sql: String): Result DataFrame String = {
+    let r = query(conn, sql)?;
+    let df = dfFromResult(r);
+    closeResult(r);
+    Ok(df)
+}
+
+pub def dfRun(conn: Connection, q: Query): Result DataFrame String = {
+    let r = runQuery(conn, q)?;
+    let df = dfFromResult(r);
+    closeResult(r);
+    Ok(df)
+}
+
+pub def dfReadParquet(conn: Connection, path: String): Result DataFrame String = {
+    let r = readParquet(conn, path)?;
+    let df = dfFromResult(r);
+    closeResult(r);
+    Ok(df)
+}
+
+pub def dfReadCsv(conn: Connection, path: String): Result DataFrame String = {
+    let r = readCsv(conn, path)?;
+    let df = dfFromResult(r);
+    closeResult(r);
+    Ok(df)
+}
+
+def findCol(cols: List Column, target: String): Option Column = match cols {
+    Nil -> None,
+    Cons(c, rest) ->
+        if (colName(c) == target) Some(c)
+        else findCol(rest, target),
+}
+
+pub def dfColFloat(df: DataFrame, name: String): Result Series String = match findCol(df.cols, name) {
+    Some(ColF64(_, arr)) -> Ok(MkSeries { len: df.numRows, values: arr }),
+    Some(ColI64(_, arr)) -> {
+        let out = arrayNew(df.numRows, 0.0);
+        let i = cellNew(0);
+        while (cellGet(i) < df.numRows) {
+            let idx = cellGet(i);
+            arraySet(out, idx, intToFloat(i64ToInt(arrayGet(arr, idx))));
+            cellSet(i, idx + 1)
+        };
+        Ok(MkSeries { len: df.numRows, values: out })
+    },
+    Some(_) -> Err("column '" + name + "' is not numeric"),
+    None -> Err("column not found: " + name),
+}
+
+pub def dfColInt64(df: DataFrame, name: String): Result (MutArray Int64) String = match findCol(df.cols, name) {
+    Some(ColI64(_, arr)) -> Ok(arr),
+    Some(_) -> Err("column '" + name + "' is not Int64"),
+    None -> Err("column not found: " + name),
+}
+
+pub def dfColStr(df: DataFrame, name: String): Result (MutArray String) String = match findCol(df.cols, name) {
+    Some(ColStr(_, arr)) -> Ok(arr),
+    Some(_) -> Err("column '" + name + "' is not String"),
+    None -> Err("column not found: " + name),
+}
+
+// Pivot a long-format DataFrame `(timeCol: Int64, assetCol: String, valueCol: Float)`
+// into a 2D `(T, N)` Panel, preserving first-seen order of timestamps and assets.
+pub def dfToPanel(df: DataFrame, timeCol: String, assetCol: String, valueCol: String): Result Panel String = {
+    let times = dfColInt64(df, timeCol)?;
+    let assets = dfColStr(df, assetCol)?;
+    let vals = dfColFloat(df, valueCol)?;
+
+    let timeMap = strMapNew();
+    let timeVec = vecNew();
+    let assetMap = strMapNew();
+    let assetVec = vecNew();
+
+    let i = cellNew(0);
+    while (cellGet(i) < df.numRows) {
+        let idx = cellGet(i);
+        let t = arrayGet(times, idx);
+        let tKey = i64ToStr(t);
+        match strMapGet(timeMap, tKey) {
+            Some(_) -> (),
+            None -> {
+                strMapInsert(timeMap, tKey, vecLen(timeVec));
+                vecPush(timeVec, t)
+            },
+        };
+        let a = arrayGet(assets, idx);
+        match strMapGet(assetMap, a) {
+            Some(_) -> (),
+            None -> {
+                strMapInsert(assetMap, a, vecLen(assetVec));
+                vecPush(assetVec, a)
+            },
+        };
+        cellSet(i, idx + 1)
+    };
+
+    let nT = vecLen(timeVec);
+    let nN = vecLen(assetVec);
+    let p = panelNew(nT, nN);
+
+    let ti = cellNew(0);
+    while (cellGet(ti) < nT) {
+        let k = cellGet(ti);
+        arraySet(p.times, k, vecGetOr(timeVec, k, intToI64(0)));
+        cellSet(ti, k + 1)
+    };
+    let ai = cellNew(0);
+    while (cellGet(ai) < nN) {
+        let k = cellGet(ai);
+        arraySet(p.assets, k, vecGetOr(assetVec, k, ""));
+        cellSet(ai, k + 1)
+    };
+
+    let r = cellNew(0);
+    while (cellGet(r) < df.numRows) {
+        let idx = cellGet(r);
+        let tKey = i64ToStr(arrayGet(times, idx));
+        let a = arrayGet(assets, idx);
+        let v = arrayGet(vals.values, idx);
+        match strMapGet(timeMap, tKey) {
+            Some(tIdx) ->
+                match strMapGet(assetMap, a) {
+                    Some(aIdx) -> panelSet(p, tIdx, aIdx, v),
+                    None -> (),
+                },
+            None -> (),
+        };
+        cellSet(r, idx + 1)
+    };
+    Ok(p)
+}

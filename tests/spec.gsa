@@ -1,0 +1,133 @@
+// Verification suite for `data.gsa` (`tests/spec.gsa`).
+
+use std.result.{Result, Ok, Err}
+use sys.fs.removeFile
+use sys.io.eprintLn
+use sys.proc.exit
+
+use duckdb.duckdb.{openMemory, closeDb, connect, disconnect, exec, writeParquet}
+use duckdb.dsl.{(|>), col, litFloat, gt, fromParquet, selectCols, filter, orderByAsc}
+use dataset.series.{
+    nanVal, isNan, seriesNew, seriesSet, seriesGet,
+    seriesMean, seriesStd, seriesMedian, seriesRank, seriesZscore,
+    seriesCorr, seriesRankCorr, seriesRollingMean, seriesEma
+}
+use dataset.panel.{
+    panelGet, panelCsRank, panelTsRollingMean,
+    panelSaveBin, panelOpenMmap, mmapPanelTime, mmapPanelGet, mmapPanelClose
+}
+use dataset.frame.{dfRun, dfToPanel}
+
+def assertTrue(label: String, ok: Bool): Result Void String =
+    if (ok) Ok(()) else Err("ASSERT FAILED: " + label)
+
+def approxEq(a: Float, b: Float, eps: Float): Bool = {
+    let d = a - b;
+    (if (d < 0.0) 0.0 - d else d) <= eps
+}
+
+def testSeriesStats(): Result Void String = {
+    let s = seriesNew(5, nanVal());
+    seriesSet(s, 0, 10.0);
+    seriesSet(s, 1, 20.0);
+    seriesSet(s, 2, nanVal());
+    seriesSet(s, 3, 20.0);
+    seriesSet(s, 4, 30.0);
+
+    assertTrue("seriesMean ignores NaN", approxEq(seriesMean(s), 20.0, 1.0e-9))?;
+    assertTrue("seriesMedian == 20.0", approxEq(seriesMedian(s), 20.0, 1.0e-9))?;
+    // values [10, 20, 20, 30] -> sample var = (100+0+0+100)/3 = 66.6667 -> std = 8.1649658
+    assertTrue("seriesStd(ddof=1)", approxEq(seriesStd(s, true), 8.16496580927726, 1.0e-6))?;
+
+    // Average-tie rank scaled to (0, 1]: 10->1/4=0.25, 20->2.5/4=0.625, 30->4/4=1.0
+    let r = seriesRank(s);
+    assertTrue("rank[0] == 0.25", approxEq(seriesGet(r, 0), 0.25, 1.0e-9))?;
+    assertTrue("rank[1] == 0.625 (tie avg)", approxEq(seriesGet(r, 1), 0.625, 1.0e-9))?;
+    assertTrue("rank[2] stays NaN", isNan(seriesGet(r, 2)))?;
+    assertTrue("rank[4] == 1.0", approxEq(seriesGet(r, 4), 1.0, 1.0e-9))?;
+
+    let z = seriesZscore(s);
+    assertTrue("zscore mean == 0", approxEq(seriesMean(z), 0.0, 1.0e-9))?;
+
+    // Perfect monotonic rank correlation = 1.0
+    let a = seriesNew(4, 0.0);
+    let b = seriesNew(4, 0.0);
+    seriesSet(a, 0, 1.0); seriesSet(a, 1, 2.0); seriesSet(a, 2, 3.0); seriesSet(a, 3, 4.0);
+    seriesSet(b, 0, 1.0); seriesSet(b, 1, 4.0); seriesSet(b, 2, 9.0); seriesSet(b, 3, 16.0);
+    assertTrue("Spearman rank corr == 1.0", approxEq(seriesRankCorr(a, b), 1.0, 1.0e-9))?;
+    assertTrue("Pearson corr > 0.98", seriesCorr(a, b) > 0.98)?;
+
+    let rm = seriesRollingMean(a, 2, 2);
+    assertTrue("rollingMean[0] is NaN", isNan(seriesGet(rm, 0)))?;
+    assertTrue("rollingMean[3] == 3.5", approxEq(seriesGet(rm, 3), 3.5, 1.0e-9))?;
+
+    let em = seriesEma(a, 3.0);
+    assertTrue("ema[0] == 1.0", approxEq(seriesGet(em, 0), 1.0, 1.0e-9))?;
+    assertTrue("ema[1] == 1.5", approxEq(seriesGet(em, 1), 1.5, 1.0e-9))?;
+
+    printLn("  [PASS] data.series: NaN-aware stats, tie-avg rank, Spearman RankIC, rolling & EMA");
+    Ok(())
+}
+
+def testDuckDbToPanelAndMmap(): Result Void String = {
+    let db = openMemory()?;
+    let conn = connect(db)?;
+
+    exec(conn, "CREATE TABLE klines (ts BIGINT, sym VARCHAR, close DOUBLE)")?;
+    exec(conn, "INSERT INTO klines VALUES (100, 'BTC', 100.0), (100, 'ETH', 200.0), (100, 'SOL', 50.0)")?;
+    exec(conn, "INSERT INTO klines VALUES (200, 'BTC', 110.0), (200, 'ETH', 180.0), (200, 'SOL', 60.0)")?;
+    exec(conn, "INSERT INTO klines VALUES (300, 'BTC', 120.0), (300, 'ETH', 220.0), (300, 'SOL', 70.0)")?;
+
+    let pqPath = "/tmp/geisha_data_test_klines.parquet";
+    writeParquet(conn, "SELECT ts, sym, close FROM klines ORDER BY ts, sym", pqPath)?;
+
+    // Query Parquet via DSL (no raw SQL!) -> DataFrame -> (T, N) Panel
+    let q = fromParquet(pqPath)
+        |> selectCols(["ts", "sym", "close"])
+        |> filter(gt(col("close"), litFloat(0.0)))
+        |> orderByAsc("ts");
+    let df = dfRun(conn, q)?;
+    let p = dfToPanel(df, "ts", "sym", "close")?;
+    assertTrue("panel shape 3x3", p.rows == 3 && p.cols == 3)?;
+    assertTrue("panel[0,0] BTC=100", approxEq(panelGet(p, 0, 0), 100.0, 1.0e-9))?;
+    assertTrue("panel[1,1] ETH=180", approxEq(panelGet(p, 1, 1), 180.0, 1.0e-9))?;
+
+    // Cross-sectional rank at t=0: SOL(50)=1/3, BTC(100)=2/3, ETH(200)=1.0
+    let csR = panelCsRank(p);
+    assertTrue("csRank BTC(t=0) == 2/3", approxEq(panelGet(csR, 0, 0), 2.0 / 3.0, 1.0e-9))?;
+    assertTrue("csRank ETH(t=0) == 1.0", approxEq(panelGet(csR, 0, 1), 1.0, 1.0e-9))?;
+    assertTrue("csRank SOL(t=0) == 1/3", approxEq(panelGet(csR, 0, 2), 1.0 / 3.0, 1.0e-9))?;
+
+    // Time-series 2-bar rolling mean for BTC: [NaN, 105.0, 115.0]
+    let tsM = panelTsRollingMean(p, 2, 2);
+    assertTrue("tsRollingMean BTC(t=0) NaN", isNan(panelGet(tsM, 0, 0)))?;
+    assertTrue("tsRollingMean BTC(t=2) == 115.0", approxEq(panelGet(tsM, 2, 0), 115.0, 1.0e-9))?;
+
+    // Zero-copy mmap GSPNL01 round-trip
+    let binPath = "/tmp/geisha_data_test_panel.gspnl";
+    panelSaveBin(p, binPath)?;
+    let mp = panelOpenMmap(binPath)?;
+    assertTrue("mmap shape 3x3", mp.rows == 3 && mp.cols == 3)?;
+    assertTrue("mmap time[2] == 300", mmapPanelTime(mp, 2) == intToI64(300))?;
+    assertTrue("mmap val[2,2] SOL=70", approxEq(mmapPanelGet(mp, 2, 2), 70.0, 1.0e-9))?;
+    mmapPanelClose(mp);
+
+    let _ = removeFile(pqPath);
+    let _ = removeFile(binPath);
+    disconnect(conn);
+    closeDb(db);
+    printLn("  [PASS] data.frame + data.panel: DuckDB Parquet -> DataFrame -> (T, N) Panel -> GSPNL01 mmap");
+    Ok(())
+}
+
+def main(): Void = {
+    printLn("Running data.gsa test suite...");
+    match testSeriesStats() {
+        Err(e) -> { eprintLn("FAIL: " + e); exit(1) },
+        Ok(_) ->
+            match testDuckDbToPanelAndMmap() {
+                Err(e) -> { eprintLn("FAIL: " + e); exit(1) },
+                Ok(_) -> printLn("data.gsa: all tests passed!"),
+            },
+    }
+}

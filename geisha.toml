@@ -1,0 +1,10 @@
+name = "dataset"
+version = "0.1.0"
+src_dir = "src"
+tests = ["tests/spec.gsa"]
+
+[deps]
+duckdb = { path = "../duckdb.gsa" }
+
+[target.native]
+c_sources = ["native/gs_panel_io.c"]
