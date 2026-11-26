@@ -4,4 +4,4 @@ src_dir = "src"
 tests = ["tests/spec.gsa"]
 
 [deps]
-duckdb = { path = "../duckdb.gsa" }
+duckdb = { git = "github.com/geisha-lang/duckdb.gsa", version = "0.1.0" }
