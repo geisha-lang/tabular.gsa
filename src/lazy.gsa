@@ -1,0 +1,170 @@
+// Polars-style LazyFrame (`tabular.lazy`) powered by DuckDB under the hood.
+// Users compose transformations with `|>` and never write raw SQL or manage DB handles:
+//
+//   scanParquet("trades.parquet")
+//     |> lfWithColumns([alias(eMul(eCol("price"), eCol("qty")), "notional")])
+//     |> lfFilter(eGt(eCol("notional"), eFloat(1000.0)))
+//     |> lfGroupByAgg(["sym"], [alias(eSum(eCol("notional")), "vol"), alias(eCountAll(), "n")])
+//     |> lfSortDesc("vol")
+//     |> lfLimit(10)
+//     |> collect
+
+use std.result.{Result, Ok, Err}
+use duckdb.duckdb.{Connection, openMemory, closeDb, connect, disconnect, closeResult}
+use duckdb.dsl.{
+    Query, Expr, OrderItem,
+    fromTable, fromParquet, fromCsv, fromSubquery,
+    select, selectCols, distinct, filter, groupBy, having,
+    orderBy, orderByAsc, orderByDesc, limit, offset,
+    joinInner, joinLeft, joinParquetLeft,
+    rawExpr, col, isNotNull, and_,
+    toSql, runQuery, writeQueryParquet
+}
+use tabular.frame.{DataFrame, dfFromResult}
+
+pub data LazyFrame {
+    LazyFrame(Query),
+}
+
+pub def scanParquet(path: String): LazyFrame = LazyFrame(fromParquet(path))
+pub def scanCsv(path: String): LazyFrame = LazyFrame(fromCsv(path))
+pub def scanTable(name: String): LazyFrame = LazyFrame(fromTable(name))
+
+pub def lfExplain(lf: LazyFrame): String = match lf {
+    LazyFrame(q) -> toSql(q),
+}
+
+pub def lfSelect(exprs: List Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(select(exprs)(q)),
+}
+
+pub def lfSelectCols(names: List String): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(selectCols(names)(q)),
+}
+
+// Polars-style `with_columns`: keeps all existing columns and appends computed expressions.
+// Wraps the upstream query in a subquery if projections or aggregations were already applied.
+pub def lfWithColumns(exprs: List Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> {
+        let baseQ = match q.projections {
+            Nil -> q,
+            _ -> fromSubquery(q, "_lf_sub"),
+        };
+        LazyFrame(select(Cons(rawExpr("*"), exprs))(baseQ))
+    },
+}
+
+pub def lfFilter(pred: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> {
+        // If `withColumns` or `select` created aliases, wrap before filtering so aliases are visible.
+        let baseQ = match q.projections {
+            Nil -> q,
+            _ -> fromSubquery(q, "_lf_flt"),
+        };
+        LazyFrame(filter(pred)(baseQ))
+    },
+}
+
+def buildNotNullPred(cols: List String): Expr = match cols {
+    Nil -> rawExpr("TRUE"),
+    Cons(c, Nil) -> isNotNull(col(c)),
+    Cons(c, rest) -> and_(isNotNull(col(c)), buildNotNullPred(rest)),
+}
+
+pub def lfDropNulls(cols: List String): LazyFrame -> LazyFrame =
+    lfFilter(buildNotNullPred(cols))
+
+def mapKeyCols(keys: List String): List Expr = match keys {
+    Nil -> Nil,
+    Cons(k, rest) -> Cons(col(k), mapKeyCols(rest)),
+}
+
+def appendExprs(a: List Expr, b: List Expr): List Expr = match a {
+    Nil -> b,
+    Cons(h, t) -> Cons(h, appendExprs(t, b)),
+}
+
+// Polars-style `group_by(keys).agg(aggs)`: automatically includes group keys in the output.
+pub def lfGroupByAgg(keys: List String, aggs: List Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> {
+        let baseQ = match q.projections {
+            Nil -> q,
+            _ -> fromSubquery(q, "_lf_grp"),
+        };
+        let proj = appendExprs(mapKeyCols(keys), aggs);
+        LazyFrame(groupBy(keys)(select(proj)(baseQ)))
+    },
+}
+
+pub def lfHaving(pred: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(having(pred)(q)),
+}
+
+pub def lfSort(items: List OrderItem): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(orderBy(items)(q)),
+}
+
+pub def lfSortAsc(colName: String): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(orderByAsc(colName)(q)),
+}
+
+pub def lfSortDesc(colName: String): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(orderByDesc(colName)(q)),
+}
+
+pub def lfLimit(n: Int): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(limit(n)(q)),
+}
+
+pub def lfOffset(n: Int): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(offset(n)(q)),
+}
+
+pub def lfUnique(): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(distinct()(q)),
+}
+
+pub def lfJoinInner(table: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(joinInner(table, onExpr)(q)),
+}
+
+pub def lfJoinLeft(table: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(joinLeft(table, onExpr)(q)),
+}
+
+pub def lfJoinParquetLeft(path: String, aliasName: String, onExpr: Expr): LazyFrame -> LazyFrame = (lf: LazyFrame) -> match lf {
+    LazyFrame(q) -> LazyFrame(joinParquetLeft(path, aliasName, onExpr)(q)),
+}
+
+// Execute LazyFrame on an existing DuckDB connection.
+pub def collectWith(conn: Connection, lf: LazyFrame): Result DataFrame String = match lf {
+    LazyFrame(q) -> {
+        let r = runQuery(conn, q)?;
+        let df = dfFromResult(r);
+        closeResult(r);
+        Ok(df)
+    },
+}
+
+// Zero-boilerplate execution: spins up an ephemeral DuckDB engine, executes, and cleans up.
+pub def collect(lf: LazyFrame): Result DataFrame String = {
+    let db = openMemory()?;
+    let conn = connect(db)?;
+    let res = collectWith(conn, lf);
+    disconnect(conn);
+    closeDb(db);
+    res
+}
+
+pub def sinkParquetWith(conn: Connection, lf: LazyFrame, path: String): Result Void String = match lf {
+    LazyFrame(q) -> writeQueryParquet(conn, q, path),
+}
+
+pub def sinkParquet(lf: LazyFrame, path: String): Result Void String = {
+    let db = openMemory()?;
+    let conn = connect(db)?;
+    let res = sinkParquetWith(conn, lf, path);
+    disconnect(conn);
+    closeDb(db);
+    res
+}

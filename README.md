@@ -1,12 +1,26 @@
 # tabular.gsa
 
-Quantitative tabular & panel data toolkit for Geisha (`package name = "tabular"`), built on `duckdb.gsa`.
+Polars-style unified tabular data toolkit for Geisha (`LazyFrame`, `DataFrame`, `Series`, `Expr`), powered by `duckdb.gsa` under the hood.
 
 ## Modules
 
-- `tabular.series` — NaN-aware 1D `Series`: `seriesMean`, `seriesStd`, `seriesMedian`, `seriesQuantile`, tie-averaged `seriesRank`, `seriesDemean`, `seriesZscore`, `seriesCorr`, `seriesRankCorr` (Spearman RankIC), `seriesShift`, `seriesDiff`, `seriesPctChange`, `seriesRollingSum/Mean/Std`, `seriesEma`
-- `tabular.panel` — 2D `(T, N)` row-major `Panel`: `panelSliceTime`, `panelCsRank/Demean/Zscore`, `panelTsShift/Diff/PctChange/RollingMean/RollingStd/Ema`, and zero-copy `mmap` binary format (`GSPNL01`) via `panelSaveBin` / `panelOpenMmap` / `mmapPanelGet`
-- `tabular.frame` — Typed columnar `DataFrame` bridged to `duckdb.duckdb` & `duckdb.dsl` (`dfRun`, `dfQuery`, `dfReadParquet`, `dfReadCsv`, `dfToPanel`)
+- `tabular.lazy` — Polars-style `LazyFrame`: `scanParquet`, `scanCsv`, `scanTable`, `lfSelect`, `lfWithColumns`, `lfFilter`, `lfDropNulls`, `lfGroupByAgg`, `lfSortAsc/Desc`, `lfLimit`, `lfJoinInner/Left`, `collect`, `sinkParquet`
+- `tabular.frame` — In-memory columnar `DataFrame`: `dfReadParquet`, `dfReadCsv`, `dfHeight`, `dfWidth`, `dfSelect`, `dfDrop`, `dfWithColumn`, `dfSlice`, `dfHead`, `dfSeries`, `dfColInt64/Str/Bool`, `dfFormat`
+- `tabular.series` — NaN-aware 1D numerical `Series`: `seriesMean`, `seriesStd`, `seriesMedian`, `seriesQuantile`, `seriesRank`, `seriesDemean`, `seriesZscore`, `seriesCorr`, `seriesRankCorr`, `seriesShift`, `seriesDiff`, `seriesPctChange`, `seriesRollingSum/Mean/Std`, `seriesEma`
+- `tabular.expr` — Composable column/aggregate/window expressions (`eCol`, `eFloat`, `eMul`, `eGt`, `eSum`, `eMean`, `alias`, `over`, `|>`)
+
+## Example
+
+```geisha
+let df = scanParquet("trades.parquet")
+    |> lfDropNulls(["qty"])
+    |> lfWithColumns([alias(eMul(eCol("price"), eCol("qty")), "notional")])
+    |> lfFilter(eGt(eCol("notional"), eFloat(400.0)))
+    |> lfGroupByAgg(["sym"], [alias(eSum(eCol("notional")), "total_notional"), alias(eCountAll(), "n")])
+    |> lfSortDesc("total_notional")
+    |> lfLimit(10)
+    |> collect?;
+```
 
 ## Test
 

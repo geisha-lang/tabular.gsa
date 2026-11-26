@@ -1,0 +1,69 @@
+// Polars-style expression builders (`tabular.expr`) backed by `duckdb.dsl`.
+
+use duckdb.dsl.{
+    Expr, OrderItem,
+    col, qcol, litInt, litInt64, litFloat, litStr, litBool, litNull, rawExpr,
+    eq, neq, lt, lte, gt, gte,
+    and_, or_, not_, isNull, isNotNull, like, between, inStrs, inInt64s,
+    add, sub, mul, div, neg,
+    asCol, fnCall, sum, avg, min_, max_, stddev, median, countAll, countCol, countDistinct,
+    coalesce, castFloat, castInt64, castStr, overPartition, asc, desc
+}
+
+pub def (|>)(x: a, f: a -> b): b = f(x)
+
+pub def alias(e: Expr, name: String): Expr = asCol(e, name)
+pub def mean(e: Expr): Expr = avg(e)
+pub def std(e: Expr): Expr = stddev(e)
+pub def count(e: Expr): Expr = countCol(e)
+pub def over(e: Expr, partitionCols: List String, orders: List OrderItem): Expr =
+    overPartition(e, partitionCols, orders)
+
+pub def eCol(name: String): Expr = col(name)
+pub def eQCol(tbl: String, name: String): Expr = qcol(tbl, name)
+pub def eInt(n: Int): Expr = litInt(n)
+pub def eInt64(n: Int64): Expr = litInt64(n)
+pub def eFloat(x: Float): Expr = litFloat(x)
+pub def eStr(s: String): Expr = litStr(s)
+pub def eBool(b: Bool): Expr = litBool(b)
+pub def eNull(): Expr = litNull()
+pub def eStar(): Expr = rawExpr("*")
+
+pub def eEq(a: Expr, b: Expr): Expr = eq(a, b)
+pub def eNeq(a: Expr, b: Expr): Expr = neq(a, b)
+pub def eLt(a: Expr, b: Expr): Expr = lt(a, b)
+pub def eLte(a: Expr, b: Expr): Expr = lte(a, b)
+pub def eGt(a: Expr, b: Expr): Expr = gt(a, b)
+pub def eGte(a: Expr, b: Expr): Expr = gte(a, b)
+pub def eAnd(a: Expr, b: Expr): Expr = and_(a, b)
+pub def eOr(a: Expr, b: Expr): Expr = or_(a, b)
+pub def eNot(a: Expr): Expr = not_(a)
+pub def eIsNull(a: Expr): Expr = isNull(a)
+pub def eIsNotNull(a: Expr): Expr = isNotNull(a)
+pub def eLike(a: Expr, pat: String): Expr = like(a, pat)
+pub def eBetween(x: Expr, lo: Expr, hi: Expr): Expr = between(x, lo, hi)
+pub def eInStrs(x: Expr, vals: List String): Expr = inStrs(x, vals)
+pub def eInInt64s(x: Expr, vals: List Int64): Expr = inInt64s(x, vals)
+
+pub def eAdd(a: Expr, b: Expr): Expr = add(a, b)
+pub def eSub(a: Expr, b: Expr): Expr = sub(a, b)
+pub def eMul(a: Expr, b: Expr): Expr = mul(a, b)
+pub def eDiv(a: Expr, b: Expr): Expr = div(a, b)
+pub def eNeg(a: Expr): Expr = neg(a)
+
+pub def eSum(e: Expr): Expr = sum(e)
+pub def eMean(e: Expr): Expr = avg(e)
+pub def eMin(e: Expr): Expr = min_(e)
+pub def eMax(e: Expr): Expr = max_(e)
+pub def eStd(e: Expr): Expr = stddev(e)
+pub def eMedian(e: Expr): Expr = median(e)
+pub def eCountAll(): Expr = countAll()
+pub def eCount(e: Expr): Expr = countCol(e)
+pub def eCountDistinct(e: Expr): Expr = countDistinct(e)
+pub def eCoalesce(a: Expr, b: Expr): Expr = coalesce(a, b)
+pub def eCastFloat(e: Expr): Expr = castFloat(e)
+pub def eCastInt64(e: Expr): Expr = castInt64(e)
+pub def eCastStr(e: Expr): Expr = castStr(e)
+pub def eFn(name: String, args: List Expr): Expr = fnCall(name, args)
+pub def eAsc(e: Expr): OrderItem = asc(e)
+pub def eDesc(e: Expr): OrderItem = desc(e)

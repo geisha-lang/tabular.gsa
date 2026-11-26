@@ -5,6 +5,3 @@ tests = ["tests/spec.gsa"]
 
 [deps]
 duckdb = { path = "../duckdb.gsa" }
-
-[target.native]
-c_sources = ["native/gs_panel_io.c"]
