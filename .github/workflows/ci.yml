@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-24.04
+          - label: darwin-arm64
+            os: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Clang & DuckDB 2.0.1 C library (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
+          sudo apt-get update
+          sudo apt-get install -y clang xz-utils curl ca-certificates
+          TMP_DUCK="$(mktemp -d)"
+          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v2.0.1/duckdb-shared-libs-linux-amd64.tar.gz" -o "$TMP_DUCK/duckdb.tar.gz"
+          tar -xzf "$TMP_DUCK/duckdb.tar.gz" -C "$TMP_DUCK"
+          sudo cp "$TMP_DUCK"/libduckdb.so* /usr/local/lib/
+          curl -fsSL "https://raw.githubusercontent.com/duckdb/duckdb/v2.0.1/src/include/duckdb.h" -o "$TMP_DUCK/duckdb.h"
+          sudo cp "$TMP_DUCK/duckdb.h" /usr/local/include/duckdb.h
+          sudo ldconfig
+          rm -rf "$TMP_DUCK"
+
+      - name: Ensure DuckDB & xz are installed (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew list duckdb >/dev/null 2>&1 || brew install duckdb
+          command -v xz >/dev/null 2>&1 || brew install xz
+
+      - name: Resolve Geisha compiler commit
+        id: geisha-rev
+        run: |
+          SHA="$(git ls-remote https://github.com/geisha-lang/geisha.gsa.git refs/heads/main | awk '{print $1}')"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Geisha toolchain
+        id: cache-geisha
+        uses: actions/cache@v4
+        with:
+          path: ~/.geisha
+          key: geisha-tabular-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.geisha-rev.outputs.sha }}
+
+      - name: Build Geisha toolchain (on cache miss)
+        if: steps.cache-geisha.outputs.cache-hit != 'true'
+        run: |
+          SRC="$(mktemp -d)"
+          git clone --depth 1 https://github.com/geisha-lang/geisha.gsa.git "$SRC"
+          make -C "$SRC" runtime stage1 stage2
+          mkdir -p "$HOME/.geisha/bin" "$HOME/.geisha/lib"
+          cp "$SRC/build/geisha2" "$HOME/.geisha/bin/geisha"
+          cp "$SRC/build/libgeisha_runtime.a" "$HOME/.geisha/lib/libgeisha_runtime.a"
+          rm -rf "$SRC"
+
+      - name: Add Geisha to PATH
+        run: echo "$HOME/.geisha/bin" >> "$GITHUB_PATH"
+
+      - name: Typecheck, docs & Frame / LazyFrame / Series test suite
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: |
+          geisha check
+          geisha doc tabular.tabular >/dev/null
+          geisha doc tabular.lazy >/dev/null
+          geisha doc tabular.frame >/dev/null
+          geisha doc tabular.series >/dev/null
+          geisha test
